@@ -44,7 +44,11 @@ export EMSDK_QUIET=1
 # on PATH once install+activate have run, so bootstrap first when needed.
 if [ ! -x "$WASM_EMSDK_DIR/upstream/emscripten/emcc" ]; then
   echo "[build] emsdk: installing + activating latest toolchain (first run only)"
-  "$WASM_EMSDK_DIR/emsdk" install latest
+  "$WASM_EMSDK_DIR/emsdk" install latest || {
+    echo "ERROR: emsdk install failed (rc=$?)" >&2
+    df -h >&2
+    exit 1
+  }
   "$WASM_EMSDK_DIR/emsdk" activate latest
 fi
 # shellcheck disable=SC1091
@@ -105,10 +109,10 @@ cp "$GAME/port/"sonicgenerations_*.toml "$BUILD_DIR/" 2>/dev/null || true
 # On wasm+SIMD128 simde maps __m128/__m128i to the same v128_t; the
 # movemask_epi8 call sites emitted by the vector builder are rewritten to the
 # explicit setFromMaskInt variant added by the patch (see context.h).
-grep -rl 'setFromMask(simde_mm_load_si128((simde__m128i\*)' "$GEN_DST" | while read -r f; do
+{ grep -rl 'setFromMask(simde_mm_load_si128((simde__m128i\*)' "$GEN_DST" || true; } | while read -r f; do
   sed -i 's/setFromMask(simde_mm_load_si128((simde__m128i\*)/setFromMaskInt(simde_mm_load_si128((simde__m128i*)/g' "$f"
 done
-echo "[build] setFromMaskInt rewrite applied to $(grep -rl setFromMaskInt "$GEN_DST" | wc -l) files"
+echo "[build] setFromMaskInt rewrite applied to $(grep -rl setFromMaskInt "$GEN_DST" || true | wc -l) files"
 
 echo "=== [4/5] CMake configure ==="
 cmake -B "$BUILD_DIR" -S "$PRJ/emscripten" \
