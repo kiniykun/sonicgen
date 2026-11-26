@@ -1,9 +1,9 @@
 # WASM build of the Sonic Generations recomp port.
 #
-# Runs the full ~11.7M-line generated-code + SDK compile on CI runners
-# (~2-4 h on ubuntu-latest). Uploads sonicgenerations.js/.wasm as artifacts.
-#
-# Trigger: workflow_dispatch, or push when build inputs change.
+# Full ~11.7M-line generated-code + SDK compile. Needs ~15 GB disk and a lot of
+# CPU time: on a 4-core ubuntu-latest expect the timeout to be the limit, not
+# the compile. Uploads sonicgenerations.js/.wasm on success and the build log
+# on every run.
 
 name: wasm-build
 
@@ -14,19 +14,27 @@ on:
     paths:
       - "emscripten/**"
       - "ci/**"
+      - ".github/workflows/**"
 
 jobs:
   build-wasm:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-latest          # ubuntu-latest-8-cores if you have paid minutes
     timeout-minutes: 300
+    concurrency:
+      group: wasm-${{ github.ref }}
+      cancel-in-progress: true
     env:
-      # build.sh defaults assume the game repo sits next to the harness under
-      # its full project name; on CI it is checked out at ./game, so point the
-      # script at it explicitly.
       GAME_DIR: ${{ github.workspace }}/game
       REXGLUE_SDK_DIR: ${{ github.workspace }}/rexglue-sdk
       EMSDK_DIR: ${{ github.workspace }}/emsdk
     steps:
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc \
+                      /opt/hostedtoolcache/CodeQL /usr/local/share/boost
+          sudo docker image prune -af || true
+          df -h /
+
       - name: Checkout port project
         uses: actions/checkout@v4
         with:
@@ -42,7 +50,8 @@ jobs:
         uses: actions/cache@v4
         with:
           path: emsdk
-          key: emsdk-latest
+          key: emsdk-v7-${{ github.run_id }}
+          restore-keys: emsdk-v7-
 
       - name: Cache rexglue-sdk + submodules
         uses: actions/cache@v4
@@ -50,25 +59,41 @@ jobs:
           path: |
             rexglue-sdk
             !rexglue-sdk/build
-          # Bump the suffix whenever rexglue-sdk-v0.10.0-emscripten.patch changes,
-          # otherwise a stale patched SDK clone is reused.
-          key: rexglue-sdk-v0.10.0-emscripten-patched-r4
+          key: rexglue-sdk-v0.10.0-patched-r4-${{ hashFiles('harness/emscripten/rexglue-sdk-v0.10.0-emscripten.patch') }}
+          restore-keys: rexglue-sdk-v0.10.0-patched-r4-
+
+      - name: Configure only (fast fail)
+        run: |
+          set -o pipefail
+          WASM_CONFIGURE_ONLY=1 bash harness/emscripten/build.sh --jobs $(nproc) 2>&1 | tee configure.log
 
       - name: Build
         run: |
-          bash harness/emscripten/build.sh --jobs $(nproc) \
-            || bash harness/emscripten/build.sh --jobs $(nproc)
+          set -o pipefail
+          bash harness/emscripten/build.sh --jobs $(nproc) 2>&1 | tee build.log
+
+      - name: Upload logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-logs-${{ github.run_number }}
+          path: |
+            configure.log
+            build.log
+          if-no-files-found: ignore
 
       - name: Assemble web bundle
+        if: success()
         run: |
           mkdir -p web-bundle
           cp harness/web/index.html web-bundle/
           cp harness/web/serve.py web-bundle/
-          cp harness/emscripten/build/web/sonicgenerations.js web-bundle/ 2>/dev/null || true
-          cp harness/emscripten/build/web/sonicgenerations.wasm web-bundle/ 2>/dev/null || true
+          cp harness/emscripten/build/web/sonicgenerations.js web-bundle/
+          cp harness/emscripten/build/web/sonicgenerations.wasm web-bundle/
           ls -la web-bundle/
 
       - name: Upload artifact
+        if: success()
         uses: actions/upload-artifact@v4
         with:
           name: sonic-generations-wasm
