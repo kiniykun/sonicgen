@@ -1,9 +1,12 @@
 # WASM build of the Sonic Generations recomp port.
 #
 # Full ~11.7M-line generated-code + SDK compile. Needs ~15 GB disk and a lot of
-# CPU time: on a 4-core ubuntu-latest expect the timeout to be the limit, not
-# the compile. Uploads sonicgenerations.js/.wasm on success and the build log
-# on every run.
+# CPU time. Uploads sonicgenerations.js/.wasm on success and the build log on
+# every run.
+#
+# Runner: defaults to the free 4-core ubuntu-latest. Set the repository
+# variable RUNNER to "ubuntu-latest-16-cores" (or a self-hosted label) once
+# billing/runner group allows it -- 4 cores will not finish inside the timeout.
 
 name: wasm-build
 
@@ -18,8 +21,9 @@ on:
 
 jobs:
   build-wasm:
-    runs-on: ubuntu-latest          # ubuntu-latest-8-cores if you have paid minutes
-    timeout-minutes: 300
+    # Override with a repo variable; larger runners need billing/runner groups.
+    runs-on: ${{ vars.RUNNER || 'ubuntu-latest' }}
+    timeout-minutes: 350
     concurrency:
       group: wasm-${{ github.ref }}
       cancel-in-progress: true
@@ -27,6 +31,14 @@ jobs:
       GAME_DIR: ${{ github.workspace }}/game
       REXGLUE_SDK_DIR: ${{ github.workspace }}/rexglue-sdk
       EMSDK_DIR: ${{ github.workspace }}/emsdk
+      # Pin the toolchain so a rollover cannot silently break a good build.
+      # Bump deliberately, and bump the cache key below with it.
+      EMSDK_VERSION: "latest"
+      CCACHE_DIR: ${{ github.workspace }}/.ccache
+      CCACHE_COMPRESS: "1"
+      CCACHE_MAXSIZE: "2G"
+      CCACHE_BASEDIR: ${{ github.workspace }}
+      CCACHE_NOHASHDIR: "1"
     steps:
       - name: Free disk space
         run: |
@@ -36,22 +48,24 @@ jobs:
           df -h /
 
       - name: Checkout port project
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
         with:
           repository: Player124413/Sonic-Generations-recomp-android-and-pc-edition
           path: game
 
       - name: Checkout wasm harness
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
         with:
           path: harness
 
+      # Exact keys, no restore-keys prefix. A prefix match restores a stale
+      # tree under a new key and the build then reuses outdated submodules and
+      # patch state.
       - name: Cache emsdk
         uses: actions/cache@v4
         with:
           path: emsdk
-          key: emsdk-v7-${{ github.run_id }}
-          restore-keys: emsdk-v7-
+          key: emsdk-v8-${{ env.EMSDK_VERSION }}
 
       - name: Cache rexglue-sdk + submodules
         uses: actions/cache@v4
@@ -59,18 +73,44 @@ jobs:
           path: |
             rexglue-sdk
             !rexglue-sdk/build
-          key: rexglue-sdk-v0.10.0-patched-r4-${{ hashFiles('harness/emscripten/rexglue-sdk-v0.10.0-emscripten.patch') }}
-          restore-keys: rexglue-sdk-v0.10.0-patched-r4-
+          key: rexglue-sdk-${{ env.SDK_VER_KEY }}-${{ hashFiles('harness/emscripten/rexglue-sdk-v0.10.0-emscripten.patch') }}
+        env:
+          SDK_VER_KEY: v0.10.0-r5
+
+      - name: Cache ccache
+        uses: hendrikmuhs/ccache-action@v1
+        with:
+          key: wasm-ccache-${{ hashFiles('harness/emscripten/CMakeLists.txt', 'harness/emscripten/rexglue-sdk-v0.10.0-emscripten.patch') }}
+          max-size: 2G
+          verbose: 1
+
+      - name: Verify emsdk + disk
+        run: |
+          echo "runner cores: $(nproc)"
+          df -h "$GITHUB_WORKSPACE"
+          FREE_KB=$(df -Pk "$GITHUB_WORKSPACE" | awk 'NR==2{print $4}')
+          if [ "$FREE_KB" -lt 12000000 ]; then
+            echo "ERROR: only $((FREE_KB / 1024)) MB free, need ~12 GB" >&2
+            exit 1
+          fi
 
       - name: Configure only (fast fail)
         run: |
           set -o pipefail
-          WASM_CONFIGURE_ONLY=1 bash harness/emscripten/build.sh --jobs $(nproc) 2>&1 | tee configure.log
+          WASM_CONFIGURE_ONLY=1 bash harness/emscripten/build.sh --jobs "$(nproc)" 2>&1 | tee configure.log
+
+      - name: Verify SDK patch actually applied
+        run: |
+          set -euo pipefail
+          grep -q setFromMaskInt rexglue-sdk/include/rex/ppc/context.h
+          grep -q ms'imd'128 rexglue-sdk/cmake/rexglue_helpers.cmake
+          echo "patch verification OK"
+          git -C rexglue-sdk diff --stat | tail -3
 
       - name: Build
         run: |
           set -o pipefail
-          bash harness/emscripten/build.sh --jobs $(nproc) 2>&1 | tee build.log
+          bash harness/emscripten/build.sh --jobs "$(nproc)" 2>&1 | tee build.log
 
       - name: Upload logs
         if: always()
