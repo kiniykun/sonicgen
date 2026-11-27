@@ -6,6 +6,10 @@
 #
 # Configure via emscripten/build.sh (it stages the generated code and applies
 # the wasm overload rewrite first).
+#
+# Bring-up builds are -O2 without LTO: 295 TUs at -O3 -flto will eat the wasm
+# heap and the runner's RAM at link before it finishes. Set WASM_LTO=1 (build.sh
+# passes -DWASM_LTO=1) once the tree links cleanly end to end.
 
 cmake_minimum_required(VERSION 3.24)
 project(sonicgenerations_wasm CXX)
@@ -13,6 +17,14 @@ project(sonicgenerations_wasm CXX)
 set(CMAKE_CXX_STANDARD 23)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_POSITION_INDEPENDENT_CODE ON)
+
+option(WASM_LTO "Enable -O3 + LTO (slow, memory hungry)" OFF)
+if(WASM_LTO)
+  set(WASM_OPT_FLAGS -O3 -flto)
+else()
+  set(WASM_OPT_FLAGS -O2)
+endif()
+message(STATUS "wasm optimization flags: ${WASM_OPT_FLAGS}")
 
 set(REXGLUE_SDK_DIR "${REXGLUE_SDK_DIR}" CACHE PATH "rexglue-sdk root")
 set(REXGLUE_APP_SRC_DIR "${REXGLUE_APP_SRC_DIR}" CACHE PATH "staged generated code root")
@@ -32,10 +44,11 @@ target_include_directories(rexgen PRIVATE
     "${GEN}"
     "${REXGLUE_SDK_DIR}/include"
 )
-# The generated code is hot-path bound: -O3 + LTO. SIMD128 must be enabled at
-# compile time (not just link time) or simde's SSE calls compile to a scalar
-# fallback instead of mapping onto wasm v128_t intrinsics.
-target_compile_options(rexgen PRIVATE -O3 -flto -fno-rtti -w -msimd128)
+# SIMD128 must be enabled at compile time (not just link time) or simde's SSE
+# calls compile to a scalar fallback instead of mapping onto wasm v128_t
+# intrinsics.
+target_compile_options(rexgen PRIVATE ${WASM_OPT_FLAGS} -fno-rtti -w
+    -msimd128 -fwasm-exceptions)
 
 # ---- App shell -------------------------------------------------------------
 add_executable(sonicgenerations
@@ -69,7 +82,7 @@ target_link_libraries(sonicgenerations PRIVATE
 # Filesystem: FORCE_FILESYSTEM + IDBFS for save persistence; the shell mounts
 # the user-provided game files under /game before boot.
 target_link_options(sonicgenerations PRIVATE
-    -O3 -flto
+    ${WASM_OPT_FLAGS}
     -msimd128
     -sWASM=1 -sALLOW_MEMORY_GROWTH=1
     -sINITIAL_MEMORY=1GB -sMAXIMUM_MEMORY=4GB
@@ -87,7 +100,8 @@ target_link_options(sonicgenerations PRIVATE
     -sEXPORTED_FUNCTIONS=_main
     "SHELL:--use-port=emdawnwebgpu"
 )
-target_compile_options(sonicgenerations PRIVATE -O3 -flto -fno-rtti -w -msimd128 --use-port=emdawnwebgpu)
+target_compile_options(sonicgenerations PRIVATE ${WASM_OPT_FLAGS} -fno-rtti -w
+    -msimd128 -fwasm-exceptions --use-port=emdawnwebgpu)
 
 # The GPU plugin consumes WebGPU headers (Dawn port) as well.
 target_compile_options(rexgpu-xenos PRIVATE --use-port=emdawnwebgpu)
